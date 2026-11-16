@@ -1,8 +1,22 @@
 [package]
 name = "zero_chess_net"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
-description = "Zero-dependency UCI terminal and TZNUE001 NNUE evaluation framework"
+rust-version = "1.70"
+description = "Safe Rust chess framework with UCI, legal move generation, and NNUE evaluation"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/ZeroChessNet/ZeroChessNet"
+keywords = ["chess", "uci", "nnue", "engine"]
+categories = ["games"]
+
+[features]
+default = []
+gpu = ["dep:pollster", "dep:wgpu"]
+
+[dependencies]
+pollster = { version = "0.3", optional = true }
+wgpu = { version = "0.19", optional = true }
 
 [profile.release]
 opt-level = 3

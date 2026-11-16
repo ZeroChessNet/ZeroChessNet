@@ -40,7 +40,9 @@ impl SearchContext {
             let (time_left, inc) = if white_to_move { (wtime, winc) } else { (btime, binc) };
             if let Some(tl) = time_left {
                 let hard = tl.saturating_sub(50).max(5);
-                let soft = (tl / 25 + (inc * 7) / 10).min(hard).max(5);
+                let soft = (tl / 25 + inc.saturating_mul(7) / 10)
+                    .min(hard)
+                    .max(5);
                 (soft, hard)
             } else {
                 (30_000, 30_000)
@@ -62,5 +64,26 @@ impl SearchContext {
 
     pub fn soft_expired(&self) -> bool {
         self.stop_flag.load(Ordering::Relaxed) || self.start_time.elapsed() >= self.soft_limit
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_side_specific_clock_and_depth() {
+        let context =
+            SearchContext::from_uci_go("go wtime 60000 btime 30000 winc 1000 depth 12", true);
+        assert_eq!(context.max_depth, 12);
+        assert_eq!(context.soft_limit, Duration::from_millis(3100));
+        assert_eq!(context.hard_limit, Duration::from_millis(59950));
+    }
+
+    #[test]
+    fn movetime_is_a_hard_upper_bound() {
+        let context = SearchContext::from_uci_go("go movetime 100", false);
+        assert_eq!(context.soft_limit, Duration::from_millis(85));
+        assert_eq!(context.hard_limit, Duration::from_millis(85));
     }
 }

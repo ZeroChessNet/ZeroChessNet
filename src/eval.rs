@@ -1,18 +1,25 @@
 use crate::Board;
-use std::fs::File;
-use std::io::Read;
+use std::fs;
 use std::path::Path;
 
-pub struct ZcnEvaluator {
-    nnue: Option<TznueNetwork>,
-    loaded_path: Option<String>,
+const HEADER_BYTES: usize = 12;
+const FEATURE_WEIGHT_COUNT: usize = 768 * 256;
+const FEATURE_BIAS_COUNT: usize = 256;
+const OUTPUT_WEIGHT_COUNT: usize = 512;
+const NETWORK_FLOAT_COUNT: usize =
+    FEATURE_WEIGHT_COUNT + FEATURE_BIAS_COUNT + OUTPUT_WEIGHT_COUNT + 1;
+
+#[derive(Clone)]
+pub(crate) struct TznueNetwork {
+    pub(crate) ft_weights: Vec<f32>,
+    pub(crate) ft_biases: Vec<f32>,
+    pub(crate) out_weights: Vec<f32>,
+    pub(crate) out_bias: f32,
 }
 
-struct TznueNetwork {
-    ft_weights: Vec<f32>,  // 768 * 256
-    ft_biases: Vec<f32>,   // 256
-    out_weights: Vec<f32>, // 512
-    out_bias: f32,
+pub struct ZcnEvaluator {
+    pub(crate) nnue: Option<TznueNetwork>,
+    loaded_path: Option<String>,
 }
 
 impl Default for ZcnEvaluator {
@@ -23,44 +30,59 @@ impl Default for ZcnEvaluator {
 
 impl ZcnEvaluator {
     pub fn new() -> Self {
-        let mut eval = Self { nnue: None, loaded_path: None };
-        if Path::new("titan-zero.nnue").exists() {
-            let _ = eval.load_nnue("titan-zero.nnue");
+        let mut evaluator = Self {
+            nnue: None,
+            loaded_path: None,
+        };
+        if Path::new("titan-zero.nnue").is_file() {
+            if let Err(error) = evaluator.load_nnue("titan-zero.nnue") {
+                eprintln!("ZeroChessNet: failed to load titan-zero.nnue: {error}");
+            }
         }
-        eval
+        evaluator
     }
 
-    pub fn load_nnue(&mut self, path: &str) -> Result<(), String> {
-        let mut file = File::open(path).map_err(|e| format!("Cannot open '{}': {}", path, e))?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf).map_err(|e| format!("Read error: {}", e))?;
-
-        if buf.len() < 16 || &buf[0..8] != b"TZNUE001" {
-            return Err("Invalid NNUE file: missing TZNUE001 magic header".to_string());
+    pub fn load_nnue(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        let bytes = fs::read(path).map_err(|error| {
+            format!("Cannot read '{}': {error}", path.display())
+        })?;
+        let expected_len = HEADER_BYTES + NETWORK_FLOAT_COUNT * 4;
+        if bytes.len() < HEADER_BYTES || &bytes[..8] != b"TZNUE001" {
+            return Err("Invalid NNUE file: missing TZNUE001 header".to_owned());
+        }
+        if bytes.len() != expected_len {
+            return Err(format!(
+                "Invalid TZNUE001 file size: expected {expected_len} bytes, got {}",
+                bytes.len()
+            ));
         }
 
-        let float_bytes = &buf[12..];
-        let expected_floats = 768 * 256 + 256 + 512 + 1;
-        if float_bytes.len() < expected_floats * 4 {
-            return Err(format!("Truncated TZNUE001 file ({} bytes)", buf.len()));
-        }
-
-        let mut floats = Vec::with_capacity(expected_floats);
-        for chunk in float_bytes.chunks_exact(4).take(expected_floats) {
-            floats.push(f32::from_le_bytes([chunk, chunk, chunk, chunk]));
+        let mut floats = Vec::with_capacity(NETWORK_FLOAT_COUNT);
+        for chunk in bytes[HEADER_BYTES..].chunks_exact(4) {
+            let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            if !value.is_finite() {
+                return Err("Invalid TZNUE001 file: weights must be finite".to_owned());
+            }
+            floats.push(value);
         }
 
         let mut offset = 0;
-        let ft_weights = floats[offset..offset + 768 * 256].to_vec();
-        offset += 768 * 256;
-        let ft_biases = floats[offset..offset + 256].to_vec();
-        offset += 256;
-        let out_weights = floats[offset..offset + 512].to_vec();
-        offset += 512;
+        let ft_weights = floats[offset..offset + FEATURE_WEIGHT_COUNT].to_vec();
+        offset += FEATURE_WEIGHT_COUNT;
+        let ft_biases = floats[offset..offset + FEATURE_BIAS_COUNT].to_vec();
+        offset += FEATURE_BIAS_COUNT;
+        let out_weights = floats[offset..offset + OUTPUT_WEIGHT_COUNT].to_vec();
+        offset += OUTPUT_WEIGHT_COUNT;
         let out_bias = floats[offset];
 
-        self.nnue = Some(TznueNetwork { ft_weights, ft_biases, out_weights, out_bias });
-        self.loaded_path = Some(path.to_string());
+        self.nnue = Some(TznueNetwork {
+            ft_weights,
+            ft_biases,
+            out_weights,
+            out_bias,
+        });
+        self.loaded_path = Some(path.to_string_lossy().into_owned());
         Ok(())
     }
 
@@ -70,29 +92,34 @@ impl ZcnEvaluator {
 
     pub fn evaluate(&self, board: &Board) -> i32 {
         if let Some(net) = &self.nnue {
-            let mut acc_w = net.ft_biases.clone();
-            let mut acc_b = net.ft_biases.clone();
+            let mut accumulator_white = net.ft_biases.clone();
+            let mut accumulator_black = net.ft_biases.clone();
 
-            for (sq, cell) in board.squares.iter().enumerate() {
+            for (square, cell) in board.squares.iter().enumerate() {
                 if let Some(piece) = cell {
-                    let feat_w = (piece as usize) * 64 + sq;
-                    let feat_b = (piece.mirror_color() as usize) * 64 + (sq ^ 56);
-
-                    let w_row = &net.ft_weights[feat_w * 256..(feat_w + 1) * 256];
-                    let b_row = &net.ft_weights[feat_b * 256..(feat_b + 1) * 256];
-
-                    for i in 0..256 {
-                        acc_w[i] += w_row[i];
-                        acc_b[i] += b_row[i];
+                    let feature_white = (*piece as usize) * 64 + square;
+                    let feature_black =
+                        (piece.mirror_color() as usize) * 64 + (square ^ 56);
+                    let white_row =
+                        &net.ft_weights[feature_white * 256..(feature_white + 1) * 256];
+                    let black_row =
+                        &net.ft_weights[feature_black * 256..(feature_black + 1) * 256];
+                    for index in 0..256 {
+                        accumulator_white[index] += white_row[index];
+                        accumulator_black[index] += black_row[index];
                     }
                 }
             }
 
-            let (stm, nstm) = if board.white_to_move { (&acc_w, &acc_b) } else { (&acc_b, &acc_w) };
+            let (side_to_move, other_side) = if board.white_to_move() {
+                (&accumulator_white, &accumulator_black)
+            } else {
+                (&accumulator_black, &accumulator_white)
+            };
             let mut sum = net.out_bias;
-            for i in 0..256 {
-                sum += stm[i].clamp(0.0, 1.0) * net.out_weights[i];
-                sum += nstm[i].clamp(0.0, 1.0) * net.out_weights[256 + i];
+            for index in 0..256 {
+                sum += side_to_move[index].clamp(0.0, 1.0) * net.out_weights[index];
+                sum += other_side[index].clamp(0.0, 1.0) * net.out_weights[256 + index];
             }
             sum.round() as i32
         } else {
@@ -101,12 +128,37 @@ impl ZcnEvaluator {
     }
 
     fn evaluate_pesto_fallback(&self, board: &Board) -> i32 {
-        const VALS: [i32; 6] =;
+        const VALUES: [i32; 6] = [100, 320, 330, 500, 900, 0];
         let mut score = 0;
-        for cell in board.squares.iter().flatten() {
-            let idx = (*cell as usize) % 6;
-            if cell.is_white() { score += VALS[idx]; } else { score -= VALS[idx]; }
+        for piece in board.squares.iter().flatten() {
+            let value = VALUES[(*piece as usize) % 6];
+            if piece.is_white() {
+                score += value;
+            } else {
+                score -= value;
+            }
         }
-        if board.white_to_move { score } else { -score }
+        if board.white_to_move() {
+            score
+        } else {
+            -score
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_evaluation_is_relative_to_side_to_move() {
+        let white_to_move = Board::from_fen("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1").unwrap();
+        let black_to_move = Board::from_fen("4k3/8/8/8/8/8/4P3/4K3 b - - 0 1").unwrap();
+        let evaluator = ZcnEvaluator {
+            nnue: None,
+            loaded_path: None,
+        };
+        assert_eq!(evaluator.evaluate(&white_to_move), 100);
+        assert_eq!(evaluator.evaluate(&black_to_move), -100);
     }
 }

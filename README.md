@@ -1,95 +1,124 @@
-# ZeroChessNet (`zcn-rust`)
+# ZeroChessNet (`zero_chess_net`)
 
-**ZeroChessNet (ZCN)** is a zero-dependency, 100% safe-Rust (`#![forbid(unsafe_code)]`) chess engine framework that bundles a complete **UCI terminal**, **time management**, and a native **`TZNUE001` NNUE evaluation system** (with automatic PeSTO fallback) into a clean, reusable library.
+ZeroChessNet is a safe-Rust chess framework for building UCI engines. It provides a UCI terminal, validated FEN handling, legal move generation/application, search-time management, and TZNUE001 NNUE evaluation with a material-evaluation fallback.
 
-Instead of rewriting UCI protocol parsers, FEN loaders, clock controllers, and neural network evaluators for every new bot, you simply implement a single trait (`ZcnEngine`) and plug your custom search algorithm straight into ZCN.
+The default build has no third-party dependencies. Enable the optional `gpu` feature to run NNUE inference through `wgpu` on a compatible GPU.
 
----
+## Features
 
-## Core Features
+- **Safe Rust:** the crate forbids unsafe code.
+- **Legal chess moves:** generates legal moves, including castling, en passant, and all four promotion choices.
+- **UCI terminal:** handles `uci`, `isready`, `ucinewgame`, `setoption`, `position`, `go`, `d`, `eval`, and `quit`.
+- **NNUE evaluation:** loads the `TZNUE001` network format; uses material evaluation when no network is loaded.
+- **Optional GPU inference:** `wgpu` compute support is available with the `gpu` feature. CPU inference remains the default.
+- **Engine identity:** engines can override the default name and author through `ZcnEngine`, or set both on `UciTerminal`.
+- **Search context:** calculates soft and hard limits from UCI clock and depth arguments, with an atomic stop flag.
 
-- **Zero External Dependencies & 100% Safe Rust:** Built exclusively with the Rust standard library and `#![forbid(unsafe_code)]`.
-- **Complete UCI Terminal (`src/uci.rs`):** Handles `uci`, `isready`, `ucinewgame`, `setoption` (preserving spaces in Windows file paths), `position startpos/fen moves ...`, `go`, and `quit`.
-- **Built-in Interactive Debug Commands:** Inspect positions directly in the terminal using `d` (ASCII board display) and `eval` (live NNUE or PeSTO centipawn evaluation).
-- **Native `TZNUE001` NNUE Evaluator (`src/eval.rs`):** Loads dual-perspective `768 -> 256x2 -> 1` (`f32`) neural network weights via the UCI `EvalFile` option (or auto-loads `titan-zero.nnue` from the working directory), falling back cleanly to PeSTO material evaluation if no network is loaded.
-- **Smart Clock & Deadline Management (`src/time.rs`):** Converts `wtime`, `btime`, `winc`, `binc`, `movetime`, and `depth` into soft and hard search deadlines with atomic stop signaling.
-- **Modular 4-File Architecture:**
-  - `src/lib.rs` — Core board state (`Board`), `Piece`, `Move`, and the `ZcnEngine` plugin trait.
-  - `src/eval.rs` — `TZNUE001` binary weight loader, neural network inference, and PeSTO fallback.
-  - `src/time.rs` — `SearchContext` time allocator and deadline checks.
-  - `src/uci.rs` — `UciTerminal` event loop and command parser.
+## Installation
 
----
+From crates.io:
 
-## Quick Start
-
-### 1. Add `zero_chess_net` to Your Bot's `Cargo.toml`
-
-Using a local path:
 ```toml
 [dependencies]
-zero_chess_net = { path = "../ZeroChessNet/zcn-rust" }
+zero_chess_net = "1"
 ```
 
-Or directly from GitHub:
+Or directly from this repository:
+
 ```toml
 [dependencies]
-zero_chess_net = { git = "https://github.com" }
+zero_chess_net = { git = "https://github.com/ZeroChessNet/ZeroChessNet" }
 ```
 
-### 2. Implement `ZcnEngine` in `src/main.rs`
+Enable the optional GPU backend:
+
+```toml
+[dependencies]
+zero_chess_net = { version = "1", features = ["gpu"] }
+```
+
+## Quick start
+
+Implement `ZcnEngine`. The default identity is `ZeroChessNet` / `ZeroChessNet contributors`; override `name` and `author` as needed.
 
 ```rust
+use std::io;
 use zero_chess_net::{Board, Move, SearchContext, UciTerminal, ZcnEngine, ZcnEvaluator};
 
-struct MyCustomBot;
+struct MyEngine;
 
-impl ZcnEngine for MyCustomBot {
+impl ZcnEngine for MyEngine {
     fn name(&self) -> &str {
-        "MyCustomBot 1.0"
+        "MyEngine 1.0"
     }
 
     fn author(&self) -> &str {
-        "DadaK"
+        "Example author"
     }
 
-    fn search(&mut self, board: &Board, eval: &ZcnEvaluator, ctx: &SearchContext) -> Move {
-        // Evaluate the current board using TZNUE001 NNUE (or PeSTO fallback)
-        let _static_score = eval.evaluate(board);
-
-        // Check soft/hard time limits inside your iterative deepening loop
-        if ctx.should_stop() {
+    fn search(
+        &mut self,
+        board: &Board,
+        eval: &ZcnEvaluator,
+        context: &SearchContext,
+    ) -> Move {
+        let _score = eval.evaluate(board);
+        if context.should_stop() {
             return Move::NONE;
         }
 
-        // Replace with your search algorithm (PVS, Alpha-Beta, MCTS, etc.)
-        Move::from_uci("e2e4").unwrap()
+        board
+            .legal_moves()
+            .into_iter()
+            .next()
+            .unwrap_or(Move::NONE)
     }
 }
 
-fn main() {
-    let mut terminal = UciTerminal::new(MyCustomBot);
-    terminal.run();
+fn main() -> io::Result<()> {
+    UciTerminal::new(MyEngine)
+        .with_identity("MyEngine 1.0", "Example author")
+        .run()
 }
 ```
 
----
+`Board::try_apply_move` rejects illegal moves. `Board::legal_moves` returns all legal moves for the current side to move.
 
-## Interactive Terminal Commands
+## GPU NNUE inference
 
-Run your compiled binary in any terminal or UCI GUI (such as **En Croissant**, **Cutechess**, or **Arena**):
+Build with `--features gpu`, load a network using `ZcnEvaluator::load_nnue`, then create a persistent `GpuEvaluator` for repeated inference:
 
-| Command | Description |
-| :--- | :--- |
-| `uci` | Prints engine identity, UCI options (`Hash`, `Threads`, `EvalFile`), and active NNUE status. |
-| `setoption name EvalFile value <path>` | Loads a `TZNUE001` `.nnue` weight file (supports spaces in file paths). |
-| `position startpos moves e2e4 e7e5` | Sets up the starting position or a custom FEN and applies UCI moves. |
-| `go wtime 60000 btime 60000` | Starts the engine search with automatic soft/hard deadline calculation. |
-| `d` | Prints an ASCII diagram of the current board state and side to move. |
-| `eval` | Displays the static evaluation in centipawns from the side-to-move perspective. |
+```rust,ignore
+use zero_chess_net::{Board, GpuEvaluator, ZcnEvaluator};
 
----
+let mut evaluator = ZcnEvaluator::new();
+evaluator.load_nnue("titan-zero.nnue")?;
+let mut gpu = GpuEvaluator::new(&evaluator)?;
+let score = gpu.evaluate(&Board::default())?;
+println!("{}: {score} cp", gpu.adapter_name());
+```
+
+GPU support requires an available `wgpu`-compatible compute adapter. GPU initialization and inference return errors rather than silently switching backends. Call `ZcnEvaluator::evaluate` for CPU inference and automatic material fallback.
+
+## NNUE format
+
+The file consists of the eight-byte `TZNUE001` magic, a four-byte format header, then little-endian `f32` values in this order:
+
+1. `768 × 256` feature weights
+2. `256` feature biases
+3. `512` output weights
+4. `1` output bias
+
+Files with missing, extra, or non-finite weight data are rejected. The loader only replaces the active network after the new file has been fully validated.
+
+## Build and test
+
+```sh
+cargo test
+cargo test --features gpu
+cargo package --list
+```
 
 ## License
 
-MIT License — free to use, modify, and integrate into your own chess engines.
+MIT. See [LICENSE](LICENSE).
